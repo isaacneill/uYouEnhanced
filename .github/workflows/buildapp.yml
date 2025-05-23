@@ -51,7 +51,7 @@ concurrency:
 jobs:
   build:
     name: Build uYouEnhanced
-    runs-on: macos-14 # Updated to macos-14 for better Xcode/iOS 18.5 support
+    runs-on: macos-14
     permissions:
       contents: write
 
@@ -67,7 +67,7 @@ jobs:
         run: |
           brew update
           brew install ldid dpkg make
-        continue-on-error: false # Fail if dependencies can't be installed
+        continue-on-error: false
 
       - name: Set PATH environment variable
         run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
@@ -82,13 +82,14 @@ jobs:
 
       - name: SDK Caching
         id: sdk-cache
-        uses: actions/cache@v4.1.2
+        uses: actions/cache@v4
         env:
           cache-name: iOS-${{ inputs.sdk_version }}-SDK
         with:
           path: theos/sdks/
           key: ${{ runner.os }}-sdk-${{ inputs.sdk_version }}-${{ hashFiles('theos/sdks/**') }}
           restore-keys: ${{ runner.os }}-sdk-${{ inputs.sdk_version }}-
+        continue-on-error: false
 
       - name: Download iOS SDK
         if: steps.sdk-cache.outputs.cache-hit != 'true'
@@ -136,4 +137,55 @@ jobs:
           unzip -q YouTube.zip || { echo "Failed to unzip IPA"; exit 1; }
           youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion 2>/dev/null) || { echo "Failed to read YouTube version"; exit 1; }
           echo "==> YouTube v$youtube_version downloaded!"
-          sed -i '' "s/YOUTUBE_VERSION =.*/YOUTUBE_VERSION = ${youtube_version}/
+          sed -i '' "s/YOUTUBE_VERSION =.*/YOUTUBE_VERSION = ${youtube_version}/" Makefile || { echo "Failed to update Makefile with YouTube version"; exit 1; }
+          echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          YOUTUBE_URL: ${{ env.URL_YT }}
+
+      - name: Fix compiling & Build Package
+        id: build_package
+        run: |
+          cd ${{ github.workspace }}/main
+          sed -i '' "s/BUNDLE_ID =.*/BUNDLE_ID = ${{ env.BUNDLE_ID }}/" Makefile || { echo "Failed to update bundle ID in Makefile"; exit 1; }
+          sed -i '' "s/DISPLAY_NAME =.*/DISPLAY_NAME = ${{ env.APP_NAME }}/" Makefile || { echo "Failed to update app name in Makefile"; exit 1; }
+          sed -i '' "s/export TARGET =.*/export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0/" Makefile || { echo "Failed to update SDK version in Makefile"; exit 1; }
+          make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1 || { echo "Failed to build package"; exit 1; }
+          package=$(ls -t packages/*.ipa | head -n1)
+          if [ -z "$package" ]; then
+            echo "Error: No IPA found in packages directory!"
+            exit 1
+          fi
+          echo "package=$(basename "$package")" >> $GITHUB_OUTPUT
+          echo -e "==> \033[1mSHASUM256: $(shasum -a 256 "$package" | cut -f1 -d' ')\033[0m"
+          echo -e "==> \033[1mBundle ID: ${{ env.BUNDLE_ID }}\033[0m"
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          UYOU_VERSION: ${{ inputs.uyou_version }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          APP_NAME: ${{ inputs.app_name }}
+
+      - name: Upload Artifact
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4.4.3
+        env:
+          UYOU_VERSION: ${{ inputs.uyou_version }}
+          YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
+        with:
+          name: uYouEnhanced_${{ env.YOUTUBE_VERSION }}_${{ env.UYOU_VERSION }}
+          path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package }}
+          if-no-files-found: error
+
+      - name: Create Release
+        if: ${{ inputs.create_release }}
+        id: create_release
+        uses: softprops/action-gh-release@v2.1.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UYOU_VERSION: ${{ inputs.uyou_version }}
+          YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
+        with:
+          tag_name: v${{ env.YOUTUBE_VERSION }}-${{ env.UYOU_VERSION }}-(${{ github.run_number }})
+          name: v${{ env.YOUTUBE_VERSION }}-${{ env.UYOU_VERSION }}-(${{ github.run_number }})
+          files: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package }}
+          draft: true
